@@ -1,25 +1,24 @@
 #include "ntfs.h"
 
 #define SEARCH_FILENAME "FORTASK"
+// #define SEARCH_FILENAME "najkintxc"
 #define OUTPUT_FILENAME "FORTASK"
 
-int extract_file(FILE* disk, int64_t data_attr_addr, FILE* out){
-    fseek(disk, data_attr_addr, SEEK_SET);
+int64_t extract_file(FILE* disk, FILE* out, range* data_ranges, size_t data_range_size, int64_t total_data_size){
+    int64_t readed = 0;
+    for (size_t i = 0; i < data_range_size; i++){
+        fseek(disk, data_ranges[0].start, SEEK_SET);
 
-    attribute data_attr;
-    if (fread(&data_attr, sizeof(attribute), 1,disk) <= 0){perror("read data_attr"); exit(__LINE__);}
-
-    fseek(disk, data_attr_addr + data_attr.data_offset, SEEK_SET);
-
-    // printf("data_attr_addr + data_attr.data_offset: %llu\n", data_attr_addr + data_attr.data_offset);
-
-    char ch;
-    size_t i;
-    for (i = 0; i < data_attr.data_size; i++){
-        ch = fgetc(disk);
-        fputc(ch, out);
+        char ch;
+        for (size_t j = 0; j < data_ranges[i].end; j++){
+            ch = fgetc(disk);
+            fputc(ch, out);
+            if(++readed == total_data_size){
+                return readed;
+            }
+        }
     }
-    return i;
+    return readed;
 }
 
 range* drun_to_ranges(uint8_t *drun, size_t drun_size, size_t *range_size){
@@ -179,29 +178,65 @@ void fix_irecord_markups(FILE* disk, irecord_header indx_header, range indx_rang
     }
 }
 
-/// @brief get data from resident file by file name
+uint8_t* get_drun_from_attr(FILE* disk, attribute attr, int64_t attr_addr, size_t* drun_size){
+    int64_t drun_offset;
+    uint8_t *drun;
+    size_t size = *drun_size;
+
+    fseek(disk, attr_addr + 0x20, SEEK_SET);
+    if (fread(&drun_offset, sizeof(int64_t), 1,disk) <= 0){perror("fread seq_offset (find_inode_in_ialloc)"); exit(__LINE__);}
+    size = attr.length - drun_offset;
+
+    // printf("drun_size: %zu\n", drun_size);
+
+    drun = malloc(sizeof(uint8_t) * size);
+
+    fseek(disk, attr_addr + drun_offset, SEEK_SET);
+    if (fread(drun, sizeof(int8_t), size, disk) <= 0){perror("fread drun (find_inode_in_ialloc)"); exit(__LINE__);}
+    printf("(int64_t)(*drun): %llx\n", *(int64_t*)(drun));
+
+    *drun_size = size;
+    return drun;
+}
+
+/// @brief get data from file by record
 /// @param disk 
 /// @param mft_addr 
 /// @param filename 
-/// @return returns data attribute address what contains file data
-int64_t get_rdata_by_name(FILE* disk, int64_t mft_addr, char filename[]){
-    record file_record;
+/// @return returns ranges where data is stored. if error happend return NULL
+range* get_data_range_by_record(FILE* disk, record file_record, int64_t file_record_addr, size_t* range_size, int64_t *total_data_size){
+    range *data_attr_range = NULL;
     int64_t data_attr_addr;
+    attribute data_attr;
 
-    while(1){ // TODO: FIX! may cause an infinite loop
-        fseek(disk, mft_addr, SEEK_SET);
-        if (fread(&file_record, sizeof(record), 1,disk) <= 0){perror("fread file_record"); exit(__LINE__);}
-        fix_record_markups(disk, file_record, mft_addr);
+    uint8_t *drun;
+    size_t drun_size;
+    
+    fix_record_markups(disk, file_record, file_record_addr);
 
-        if (find_name_attribute(disk, file_record, mft_addr, filename) >= 0 &&\
-            (data_attr_addr = find_data_attribute(disk, file_record, mft_addr)) >= 0){
-            
-            // printf("data_attr_addr: %llu\n", data_attr_addr);
-            return data_attr_addr;
-        }
-        mft_addr += FILE_RECORD_SIZE;
+    if ((data_attr_addr = find_data_attribute(disk, file_record, file_record_addr)) < 0) return NULL;
+    
+    fseek(disk, data_attr_addr, SEEK_SET);
+    if (fread(&data_attr, sizeof(attribute), 1,disk) <= 0){perror("fread data_attr (get_data_range_by_record)"); exit(__LINE__);}
+
+    if(data_attr.non_resident_flag){
+        drun = get_drun_from_attr(disk, data_attr, data_attr_addr, &drun_size);
+        data_attr_range = drun_to_ranges(drun, drun_size, range_size);
+        printf("data attribute is not resident\n");
+
+        fseek(disk, data_attr_addr + 0x38, SEEK_SET);
+        if (fread(total_data_size, sizeof(int64_t), 1,disk) <= 0){perror("fread data_attr (get_data_range_by_record)"); exit(__LINE__);}
+
+        free(drun);
+    } else {
+        data_attr_range = malloc(sizeof(range));
+        data_attr_range[0].start = data_attr_addr + data_attr.data_offset;
+        data_attr_range[0].end = data_attr_range[0].start + data_attr.data_size;
+        *total_data_size = data_attr.data_size;
+        *range_size = 1;
+        printf("data attribute is resident\n");
     }
-    return -1;
+    return data_attr_range;
 }
 
 int64_t find_directory(FILE* disk, record file_record, int64_t file_record_addr){
@@ -259,22 +294,11 @@ int64_t find_inode_in_iroot(FILE* disk, attribute iroot_attr, int64_t iroot_attr
 }
 
 int64_t find_inode_in_ialloc(FILE* disk, attribute ialloc_attr, int64_t ialloc_attr_addr, char* filename){
-    int64_t drun_offset;
     uint8_t *drun;
     range *indx_ranges;
     size_t drun_size, range_size;
 
-    fseek(disk, ialloc_attr_addr + 0x20, SEEK_SET);
-    if (fread(&drun_offset, sizeof(int64_t), 1,disk) <= 0){perror("fread seq_offset (find_inode_in_ialloc)"); exit(__LINE__);}
-
-    drun_size = ialloc_attr.length - drun_offset;
-    // printf("drun_size: %zu\n", drun_size);
-
-    drun = malloc(sizeof(uint8_t) * drun_size);
-
-    fseek(disk, ialloc_attr_addr + drun_offset, SEEK_SET);
-    if (fread(drun, sizeof(int8_t) * drun_size, 1,disk) <= 0){perror("fread drun (find_inode_in_ialloc)"); exit(__LINE__);}
-    // printf("(int64_t)(*drun): %llx\n", *(int64_t*)(drun));
+    drun = get_drun_from_attr(disk, ialloc_attr, ialloc_attr_addr, &drun_size);
 
     indx_ranges = drun_to_ranges(drun, drun_size, &range_size);
 
@@ -299,7 +323,6 @@ int64_t find_file_by_name(FILE* disk, int64_t mft_addr, char* filename){
     attribute dir_attr;
     int64_t dir_attr_addr;
     int64_t file_addr = mft_addr + FILE_RECORD_SIZE * ROOT_RECORD_ID;
-    int64_t file_record_id;
 
     // printf("root_addr: %llu\n", file_addr);
 
@@ -317,35 +340,43 @@ int64_t find_file_by_name(FILE* disk, int64_t mft_addr, char* filename){
     if (fread(&dir_attr, sizeof(attribute), 1,disk) <= 0){perror("fread dir_attr (find_file_by_name)"); exit(__LINE__);}
 
     if (dir_attr.id == IROOT_ID){
-        // printf("find_inode_in_iroot: %lld\n",find_inode_in_iroot(disk, dir_attr, dir_attr_addr, filename));
-        file_record_id = find_inode_in_iroot(disk, dir_attr, dir_attr_addr, filename);
+        return find_inode_in_iroot(disk, dir_attr, dir_attr_addr, filename);
     } else if (dir_attr.id == IALLOCATION_ID){
-        // printf("find_inode_in_iroot: %lld\n",find_inode_in_ialloc(disk, dir_attr, dir_attr_addr, filename));
-        file_record_id = find_inode_in_ialloc(disk, dir_attr, dir_attr_addr, filename);
+        return find_inode_in_ialloc(disk, dir_attr, dir_attr_addr, filename);
     }
-
-    return file_record_id;
+    return -1;
 }
 
 int main(int argc, char* argv[]){
-    FILE *disk;
+    FILE *disk, *out;
+    record file_record;
+    range* data_ranges;
+    int64_t mft_addr, file_record_id, file_record_addr, total_data_size;
+    size_t data_range_size;
 
     if (argc != 2){perror("argv"); exit(__LINE__);}
     if ((disk = fopen(argv[1], "r+")) == NULL){perror("fopen disk"); exit(__LINE__);}
     if (fread(&boot_sector, sizeof(bootsec), 1,disk) <= 0){perror("fread boot_sector"); exit(__LINE__);}
 
-    int64_t mft_addr = boot_sector.sector_size * boot_sector.cluster_size * boot_sector.MFT_addr;
+    mft_addr = boot_sector.sector_size * boot_sector.cluster_size * boot_sector.MFT_addr;
 
-    // printf("mft_addr: %llu\n", mft_addr);
+    file_record_id = find_file_by_name(disk, mft_addr, SEARCH_FILENAME);
+    printf("find_file_by_name: %llu\n", file_record_id);
 
-    // int64_t data_attr_addr = get_rdata_by_name(disk, mft_addr, SEARCH_FILENAME);
+    file_record_addr = mft_addr + file_record_id * FILE_RECORD_SIZE;
+    fseek(disk, file_record_addr, SEEK_SET);
+    if (fread(&file_record, sizeof(record), 1,disk) <= 0){perror("fread record (main)"); exit(__LINE__);}
 
-    // if ((out = fopen(OUTPUT_FILENAME, "w")) == NULL){perror("fopen output file"); exit(__LINE__);}
+    data_ranges = get_data_range_by_record(disk, file_record, file_record_addr, &data_range_size, &total_data_size);
+    printf("data_attr_range[0].start: %llx, data_attr_range[0].end: %llx\n", data_ranges[0].start, data_ranges[0].end);
+    printf("total_data_size: %llx\n", total_data_size);
+    printf("data_range_size: %zu\n", data_range_size);
 
-    // extract_file(disk, data_attr_addr, out);
+    if ((out = fopen(OUTPUT_FILENAME, "w")) == NULL){perror("fopen outfile"); exit(__LINE__);}
 
-    find_file_by_name(disk, mft_addr, SEARCH_FILENAME);
+    printf("total_readed: %llx\n", extract_file(disk, out, data_ranges, data_range_size, total_data_size));
 
+    free(data_ranges);
     fclose(disk);
 }
 
