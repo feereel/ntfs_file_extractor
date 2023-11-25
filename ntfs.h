@@ -9,9 +9,14 @@
 
 #define FILE_RECORD_SIZE 1024
 #define FILE_RECORD_MARKUP_OFFSET 0x200
+#define IRECORD_MARKUP_OFFSET 0x400
 
 #define FILENAME_ID 0x30
 #define DATA_ID 0x80
+#define IROOT_ID 0x90
+#define IALLOCATION_ID 0xA0
+
+#define ROOT_RECORD_ID 5
 
 #define END_SIGNATURE 0xffffffff
 
@@ -52,5 +57,46 @@ typedef struct attribute{
 	uint32_t data_size;
 	uint16_t data_offset;
 } __attribute__((packed)) attribute;
+
+typedef struct inode_header{
+	uint32_t first_ientry_offset;
+	uint32_t size;
+	uint32_t allocated_size;
+	uint8_t nonleaf_flag;
+	uint8_t empty[3];
+} __attribute__((packed)) inode_header;
+
+typedef struct iroot_header{
+	uint32_t id;
+	uint32_t collation_rule;
+	uint32_t irecord_size;
+	uint8_t irecord_cluster_size;
+	uint8_t empty[3];
+	inode_header inode;
+} __attribute__((packed)) iroot_header;
+
+typedef struct ientry_header{
+	uint64_t file_reference;
+	uint16_t ientry_length;
+	uint16_t stream_length;
+	uint8_t flags;
+	uint8_t empty[3];
+} __attribute__((packed)) ientry_header;
+
+typedef struct range{
+	int64_t start;
+	int64_t end;
+} range;
+
+typedef struct irecord_header{
+	uint32_t magic;
+	uint16_t marker_offset;
+	uint16_t markerarr_len;
+	uint64_t log_file_marker;
+	uint64_t vcn;
+	inode_header inode;
+} __attribute__((packed)) irecord_header;
+
+bootsec boot_sector;
 
 #endif
