@@ -25,6 +25,13 @@
 
 #define END_SIGNATURE 0xffffffff
 
+#ifdef DEBUG
+#define dprintf(fmt,...) printf(fmt, __VA_ARGS__)
+#else
+#define dprintf(fmt,...)
+#endif
+
+
 typedef struct boot_sector{
 	uint8_t skip[11];
 	uint16_t sector_size;
