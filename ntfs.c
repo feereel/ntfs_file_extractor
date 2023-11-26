@@ -1,10 +1,5 @@
 #include "ntfs.h"
 
-#define SEARCH_FILENAME "FORTASK"
-// #define SEARCH_FILENAME "najkintxc"
-#define OUTPUT_FILENAME "FORTASK"
-
-
 int64_t extract_file(uint8_t* disk, FILE* out, range* data_ranges, size_t data_range_size, int64_t total_data_size){
     int64_t readed = 0;
     for (size_t i = 0; i < data_range_size; i++){
@@ -323,7 +318,7 @@ int main(int argc, char* argv[]){
 
     FILE* out;
 
-    if (argc != 2){perror("argv"); exit(__LINE__);}
+    if (argc != 4){perror("argv"); exit(__LINE__);}
 
     if ((fd_disk = open(argv[1], O_RDWR)) < 0 ){perror("fopen disk"); exit(__LINE__);}
 
@@ -337,7 +332,7 @@ int main(int argc, char* argv[]){
 
     dprintf("(main) mft_addr %llu\n", mft_addr);
 
-    file_record_id = find_file_by_name(disk, mft_addr, SEARCH_FILENAME);
+    file_record_id = find_file_by_name(disk, mft_addr, argv[3]);
     dprintf("(main) find_file_by_name: %llu\n", file_record_id);
 
     file_record_addr = mft_addr + file_record_id * FILE_RECORD_SIZE;
@@ -346,7 +341,7 @@ int main(int argc, char* argv[]){
 
     dprintf("(main) total_data_size: %llu\n", total_data_size);
 
-    if ((out = fopen(OUTPUT_FILENAME, "w")) == NULL){perror("fopen outfile"); exit(__LINE__);}
+    if ((out = fopen(argv[2], "w")) == NULL){perror("fopen outfile"); exit(__LINE__);}
 
     extract_file(disk, out, data_ranges, data_range_size, total_data_size);
 
