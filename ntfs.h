@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include <strings.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+#include<sys/mman.h>
+#include <sys/stat.h>
+
 #define FILE_RECORD_SIZE 1024
 #define FILE_RECORD_MARKUP_OFFSET 0x200
 #define IRECORD_MARKUP_OFFSET 0x400

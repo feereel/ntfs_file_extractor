@@ -4,15 +4,11 @@
 // #define SEARCH_FILENAME "najkintxc"
 #define OUTPUT_FILENAME "FORTASK"
 
-int64_t extract_file(FILE* disk, FILE* out, range* data_ranges, size_t data_range_size, int64_t total_data_size){
+int64_t extract_file(uint8_t* disk, FILE* out, range* data_ranges, size_t data_range_size, int64_t total_data_size){
     int64_t readed = 0;
     for (size_t i = 0; i < data_range_size; i++){
-        fseek(disk, data_ranges[0].start, SEEK_SET);
-
-        char ch;
         for (size_t j = 0; j < data_ranges[i].end; j++){
-            ch = fgetc(disk);
-            fputc(ch, out);
+            fputc(disk[data_ranges[0].start + j], out);
             if(++readed == total_data_size){
                 return readed;
             }
@@ -50,18 +46,13 @@ range* drun_to_ranges(uint8_t *drun, size_t drun_size, size_t *range_size){
     return ientries_range;
 }
 
-int compare_names(FILE* disk, int64_t filename_attr_addr, char filename[]){
-    fseek(disk, filename_attr_addr + 0x40, SEEK_SET);
-    uint8_t name_len;
-	if(fread(&name_len, sizeof(uint8_t), 1, disk) != 1){perror("fread length of file name");exit(__LINE__);}
+int compare_names(uint8_t *disk, int64_t filename_attr_addr, char filename[]){
+    uint8_t name_len = *(uint8_t*)(disk + filename_attr_addr + 0x40);
 
 	char name[name_len + 1];
-    char buff[2];
     
-    fseek(disk, filename_attr_addr + 0x42, SEEK_SET);
     for(int i = 0; i < name_len; i++){
-	    if(fread(buff, sizeof(buff), 1, disk) != 1){perror("fread file name");exit(__LINE__);}
-        name[i] = buff[0];
+        name[i] = *(char*)(disk + filename_attr_addr + 0x42 + i*2);
     }
     name[name_len] = '\0';
 
@@ -76,25 +67,29 @@ int compare_names(FILE* disk, int64_t filename_attr_addr, char filename[]){
     return 0;
 }
 
-int64_t find_attribute(FILE* disk, int64_t* attr_addr, int64_t last_attr_addr, int file_record_id, attribute *attr){
+int64_t find_attribute(uint8_t* disk, int64_t* attr_addr, int64_t last_attr_addr, int file_record_id, attribute *attr){
     //printf("*attr_addr: %llu, last_attr_addr: %llu\n", *attr_addr, last_attr_addr);
+
+    attribute _attr = *attr;
     while (*attr_addr < last_attr_addr){
-        fseek(disk, *attr_addr, SEEK_SET);
-        if (fread(attr, sizeof(attribute), 1,disk) <= 0){perror("fread attribute"); exit(__LINE__);}
-        *attr_addr += attr->length;
+        _attr = *(attribute*)(disk + *attr_addr);
 
-        //printf("attr.length: %u\n", attr->length);
-        //printf("attr.id: %u\n", attr->id);
+        *attr_addr += _attr.length;
 
-        if (attr->id == END_SIGNATURE || attr->length == 0) break;
+        //printf("attr.length: %u\n", _attr.length);
+        //printf("attr.id: %u\n", _attr.id);
 
-        if (attr->id == file_record_id)
-            return *attr_addr - attr->length;
+        if (_attr.id == END_SIGNATURE || _attr.length == 0) break;
+
+        if (_attr.id == file_record_id){
+            *attr = _attr;
+            return *attr_addr - _attr.length;
+        }
     }
     return -1;
 }
 
-int64_t find_name_attribute(FILE* disk, record file_record, int64_t file_record_addr, char filename[]){
+int64_t find_name_attribute(uint8_t* disk, record file_record, int64_t file_record_addr, char filename[]){
     int64_t next_attr_addr = file_record_addr + file_record.attr_offset;
     int64_t last_attr_addr = file_record_addr + FILE_RECORD_SIZE;
     int64_t name_attr_addr;
@@ -110,7 +105,7 @@ int64_t find_name_attribute(FILE* disk, record file_record, int64_t file_record_
 }
 
 // TODO: ADD search by thread_name
-int64_t find_data_attribute(FILE* disk, record file_record, int64_t file_record_addr){
+int64_t find_data_attribute(uint8_t* disk, record file_record, int64_t file_record_addr){
     int64_t next_attr_addr = file_record_addr + file_record.attr_offset;
     int64_t last_attr_addr = file_record_addr + FILE_RECORD_SIZE;
     int64_t name_attr_addr;
@@ -122,7 +117,7 @@ int64_t find_data_attribute(FILE* disk, record file_record, int64_t file_record_
     return -1;
 }
 
-int64_t find_iroot_attribute(FILE* disk, record file_record, int64_t file_record_addr){
+int64_t find_iroot_attribute(uint8_t* disk, record file_record, int64_t file_record_addr){
     int64_t next_attr_addr = file_record_addr + file_record.attr_offset;
     int64_t last_attr_addr = file_record_addr + FILE_RECORD_SIZE;
     int64_t name_attr_addr;
@@ -134,7 +129,7 @@ int64_t find_iroot_attribute(FILE* disk, record file_record, int64_t file_record
     return -1;
 }
 
-int64_t find_iallocation_attribute(FILE* disk, record file_record, int64_t file_record_addr){
+int64_t find_iallocation_attribute(uint8_t* disk, record file_record, int64_t file_record_addr){
     int64_t next_attr_addr = file_record_addr + file_record.attr_offset;
     int64_t last_attr_addr = file_record_addr + FILE_RECORD_SIZE;
     int64_t name_attr_addr;
@@ -146,56 +141,50 @@ int64_t find_iallocation_attribute(FILE* disk, record file_record, int64_t file_
     return -1;
 }
 
-void fix_record_markups(FILE* disk, record file_record, int64_t file_record_addr){
+void fix_record_markups(uint8_t* disk, record file_record, int64_t file_record_addr){
     uint16_t markers[file_record.markerarr_len];
 
-    fseek(disk, file_record_addr + file_record.markers_offset, SEEK_SET);
-    if (fread(markers, sizeof(uint16_t) * file_record.markerarr_len, 1,disk) < 0){perror("fread attribute"); exit(__LINE__);}
+    memcpy(markers, disk, 2 * file_record.markerarr_len);
 
     // printf("file_record_addr: %llu\n", file_record_addr);
     // printf("markers: %hu\n", (uint16_t)(*markers));
     for (size_t i = 1; i <= FILE_RECORD_SIZE/FILE_RECORD_MARKUP_OFFSET; i++){
-        fseek(disk, file_record_addr + (i * FILE_RECORD_MARKUP_OFFSET) - 2, SEEK_SET);
-        if (fwrite(&markers[i], sizeof(uint16_t), 1,disk) < 0){perror("fread attribute"); exit(__LINE__);}
+        markers[i] = *(uint16_t*)(disk + file_record_addr + (i * FILE_RECORD_MARKUP_OFFSET) - 2);
         // printf("markers[i]: %hu writed to addr: %llu\n", markers[i], file_record_addr + (i * FILE_RECORD_MARKUP_OFFSET) - 2);
     }
 }
 
-void fix_irecord_markups(FILE* disk, irecord_header indx_header, range indx_range){
+// +
+void fix_irecord_markups(uint8_t* disk, irecord_header indx_header, range indx_range){
     uint16_t markers[indx_header.markerarr_len];
     size_t size = indx_range.end - indx_range.start; 
 
-    fseek(disk, indx_range.start + indx_header.marker_offset, SEEK_SET);
-
     // printf("indx_range.start: %llx, indx_header.marker_offset: %hx\n", indx_range.start, indx_header.marker_offset);
-    if (fread(markers, sizeof(uint16_t), indx_header.markerarr_len, disk) < 0){perror("fread attribute"); exit(__LINE__);}
+
+    memcpy(markers, disk, 2 * indx_header.markerarr_len);
 
     // printf("size: %zx IRECORD_MARKUP_OFFSET: %x\n", size, IRECORD_MARKUP_OFFSET);
     for (size_t i = 1; i <= size/IRECORD_MARKUP_OFFSET; i++){
-        fseek(disk, indx_range.start + (i * IRECORD_MARKUP_OFFSET) - 2, SEEK_SET);
-        if (fwrite(&markers[i], sizeof(uint16_t), 1,disk) < 0){perror("fread markers (fix_irecord_markups)"); exit(__LINE__);}
+        markers[i] = *(uint16_t*)(disk + indx_range.start + (i * IRECORD_MARKUP_OFFSET) - 2);
         // printf("markers[%zu]: %hx writed to addr: %llx\n", i, markers[i], indx_range.start + (i * IRECORD_MARKUP_OFFSET) - 2);
     }
 }
 
-uint8_t* get_drun_from_attr(FILE* disk, attribute attr, int64_t attr_addr, size_t* drun_size){
+uint8_t* get_drun_from_attr(uint8_t* disk, attribute attr, int64_t attr_addr, size_t* drun_size){
     int64_t drun_offset;
     uint8_t *drun;
-    size_t size = *drun_size;
 
-    fseek(disk, attr_addr + 0x20, SEEK_SET);
-    if (fread(&drun_offset, sizeof(int64_t), 1,disk) <= 0){perror("fread seq_offset (find_inode_in_ialloc)"); exit(__LINE__);}
-    size = attr.length - drun_offset;
+    drun_offset = *(int64_t*)(disk + attr_addr + 0x20);
+    *drun_size = attr.length - drun_offset;
 
-    // printf("drun_size: %zu\n", drun_size);
+    printf("drun_size: %zu\n", *drun_size);
 
-    drun = malloc(sizeof(uint8_t) * size);
+    drun = malloc(sizeof(uint8_t) * (*drun_size));
 
-    fseek(disk, attr_addr + drun_offset, SEEK_SET);
-    if (fread(drun, sizeof(int8_t), size, disk) <= 0){perror("fread drun (find_inode_in_ialloc)"); exit(__LINE__);}
+    printf("attr_addr + drun_offset: %llx\n", attr_addr + drun_offset);
+    memcpy(drun, disk + attr_addr + drun_offset, *drun_size);
     printf("(int64_t)(*drun): %llx\n", *(int64_t*)(drun));
 
-    *drun_size = size;
     return drun;
 }
 
@@ -204,9 +193,9 @@ uint8_t* get_drun_from_attr(FILE* disk, attribute attr, int64_t attr_addr, size_
 /// @param mft_addr 
 /// @param filename 
 /// @return returns ranges where data is stored. if error happend return NULL
-range* get_data_range_by_record(FILE* disk, record file_record, int64_t file_record_addr, size_t* range_size, int64_t *total_data_size){
+range* get_data_range_by_record(uint8_t* disk, record file_record, int64_t file_record_addr, size_t* range_size, int64_t *total_data_size){
     range *data_attr_range = NULL;
-    int64_t data_attr_addr;
+    int64_t data_attr_addr, _total_data_size;
     attribute data_attr;
 
     uint8_t *drun;
@@ -216,41 +205,38 @@ range* get_data_range_by_record(FILE* disk, record file_record, int64_t file_rec
 
     if ((data_attr_addr = find_data_attribute(disk, file_record, file_record_addr)) < 0) return NULL;
     
-    fseek(disk, data_attr_addr, SEEK_SET);
-    if (fread(&data_attr, sizeof(attribute), 1,disk) <= 0){perror("fread data_attr (get_data_range_by_record)"); exit(__LINE__);}
+    printf("data_attr_addr: %llx\n", data_attr_addr);
+
+    data_attr = *(attribute*)(disk + data_attr_addr);
 
     if(data_attr.non_resident_flag){
         drun = get_drun_from_attr(disk, data_attr, data_attr_addr, &drun_size);
         data_attr_range = drun_to_ranges(drun, drun_size, range_size);
         printf("data attribute is not resident\n");
 
-        fseek(disk, data_attr_addr + 0x38, SEEK_SET);
-        if (fread(total_data_size, sizeof(int64_t), 1,disk) <= 0){perror("fread data_attr (get_data_range_by_record)"); exit(__LINE__);}
+        _total_data_size = *(int64_t*)(disk + data_attr_addr + 0x38);
 
         free(drun);
     } else {
         data_attr_range = malloc(sizeof(range));
         data_attr_range[0].start = data_attr_addr + data_attr.data_offset;
         data_attr_range[0].end = data_attr_range[0].start + data_attr.data_size;
-        *total_data_size = data_attr.data_size;
+        _total_data_size = data_attr.data_size;
         *range_size = 1;
         printf("data attribute is resident\n");
     }
+    *total_data_size = _total_data_size;
     return data_attr_range;
 }
 
-int64_t find_directory(FILE* disk, record file_record, int64_t file_record_addr){
+int64_t find_directory(uint8_t* disk, record file_record, int64_t file_record_addr){
     int64_t dir_attr_addr;
     attribute dir_attr;
     if((dir_attr_addr = find_iroot_attribute(disk, file_record, file_record_addr)) > 0){
-        fseek(disk, dir_attr_addr, SEEK_SET);
-        if (fread(&dir_attr, sizeof(attribute), 1,disk) < 0){perror("fread attribute (find_directory)"); exit(__LINE__);}
-
-        fseek(disk, dir_attr_addr + dir_attr.data_offset + 0x2a, SEEK_SET);
+        dir_attr = *(attribute*)(disk + dir_attr_addr);
 
         // printf("dir_attr_addr + dir_attr.data_offset + 0x2a: %llu\n", dir_attr_addr + dir_attr.data_offset + 0x2a);
-        uint16_t S;
-        if (fread(&S, sizeof(uint16_t), 1,disk) < 0){perror("fread S (find_directory)"); exit(__LINE__);}
+        uint16_t S = *(uint16_t*)(disk + dir_attr_addr + dir_attr.data_offset + 0x2a);
         // printf("S: %hu\n", S);
         if (S != 0) return dir_attr_addr;
     }
@@ -259,15 +245,15 @@ int64_t find_directory(FILE* disk, record file_record, int64_t file_record_addr)
     return -1;
 }
 
-int64_t find_ientry(FILE* disk, range ientries_range[], size_t size, char* filename){
+int64_t find_ientry(uint8_t* disk, range ientries_range[], size_t size, char* filename){
     ientry_header ientry;
+    ientry.ientry_length = 1;
     for (size_t i = 0; i < size; i++){
         int64_t next_ientry = ientries_range[i].start;
         // printf("next_ientry: %llx, end: %llx\n", next_ientry, ientries_range[i].end);
         while(next_ientry < ientries_range[i].end && ientry.ientry_length > 0){
             // printf("next_ientry: %llx\n", next_ientry);
-            fseek(disk, next_ientry, SEEK_SET);
-            if (fread(&ientry, sizeof(ientry_header), 1,disk) <= 0){perror("fread ientry (find_ientry)"); exit(__LINE__);}
+            ientry = *(ientry_header*)(disk + next_ientry);
 
             if (compare_names(disk, next_ientry + 0x10, filename))
                 return ientry.file_reference & 0xffffffffffff;
@@ -278,12 +264,11 @@ int64_t find_ientry(FILE* disk, range ientries_range[], size_t size, char* filen
     return -1;
 }
 
-int64_t find_inode_in_iroot(FILE* disk, attribute iroot_attr, int64_t iroot_attr_addr, char* filename){
+int64_t find_inode_in_iroot(uint8_t* disk, attribute iroot_attr, int64_t iroot_attr_addr, char* filename){
     iroot_header iroot;
     range ientries_range[1];
 
-    fseek(disk, iroot_attr_addr + iroot_attr.data_offset, SEEK_SET);
-    if (fread(&iroot, sizeof(iroot_header), 1,disk) <= 0){perror("fread record (find_file_by_name)"); exit(__LINE__);}
+    iroot = *(iroot_header*)(disk + iroot_attr_addr + iroot_attr.data_offset);
 
     ientries_range[0].start = iroot_attr_addr + iroot_attr.data_offset + 0x10 + iroot.inode.first_ientry_offset;
     ientries_range[0].end = iroot_attr_addr + iroot_attr.length;
@@ -293,7 +278,7 @@ int64_t find_inode_in_iroot(FILE* disk, attribute iroot_attr, int64_t iroot_attr
     return find_ientry(disk, ientries_range, 1, filename);
 }
 
-int64_t find_inode_in_ialloc(FILE* disk, attribute ialloc_attr, int64_t ialloc_attr_addr, char* filename){
+int64_t find_inode_in_ialloc(uint8_t* disk, attribute ialloc_attr, int64_t ialloc_attr_addr, char* filename){
     uint8_t *drun;
     range *indx_ranges;
     size_t drun_size, range_size;
@@ -304,20 +289,19 @@ int64_t find_inode_in_ialloc(FILE* disk, attribute ialloc_attr, int64_t ialloc_a
 
     irecord_header irecord;
     for (size_t i = 0; i < range_size; i++){
-        fseek(disk, indx_ranges[i].start, SEEK_SET);
-        if (fread(&irecord, sizeof(irecord), 1,disk) <= 0){perror("fread irecord (find_inode_in_ialloc)"); exit(__LINE__);}
+        irecord = *(irecord_header*)(disk + indx_ranges[i].start);
+
         fix_irecord_markups(disk, irecord, indx_ranges[i]);
         indx_ranges[i].start += irecord.inode.first_ientry_offset + 0x18;
     }
     // printf("indx_ranges[0].start: %llx, indx_ranges[0].end: %llx\n", indx_ranges[0].start, indx_ranges[0].end);
-
     return find_ientry(disk, indx_ranges, 1, filename);
 
     free(indx_ranges);
     free(drun);
 }
 
-int64_t find_file_by_name(FILE* disk, int64_t mft_addr, char* filename){
+int64_t find_file_by_name(uint8_t* disk, int64_t mft_addr, char* filename){
 
     record file_record;
     attribute dir_attr;
@@ -326,18 +310,16 @@ int64_t find_file_by_name(FILE* disk, int64_t mft_addr, char* filename){
 
     // printf("root_addr: %llu\n", file_addr);
 
-    fseek(disk, file_addr, SEEK_SET);
-    if (fread(&file_record, sizeof(record), 1,disk) <= 0){perror("fread record (find_file_by_name)"); exit(__LINE__);}
-    
+    file_record = *(record*)(disk+file_addr);
+
     if((dir_attr_addr = find_directory(disk, file_record, file_addr)) < 0){
         // CAN RETURN -1 IF ITS FILE
         return -1;
     }
 
-    // printf("dir_attr_addr: %llu\n", dir_attr_addr);
+    printf("dir_attr_addr: %llu\n", dir_attr_addr);
 
-    fseek(disk, dir_attr_addr, SEEK_SET);
-    if (fread(&dir_attr, sizeof(attribute), 1,disk) <= 0){perror("fread dir_attr (find_file_by_name)"); exit(__LINE__);}
+    dir_attr = *(attribute*)(disk + dir_attr_addr);
 
     if (dir_attr.id == IROOT_ID){
         return find_inode_in_iroot(disk, dir_attr, dir_attr_addr, filename);
@@ -348,24 +330,41 @@ int64_t find_file_by_name(FILE* disk, int64_t mft_addr, char* filename){
 }
 
 int main(int argc, char* argv[]){
-    FILE *disk, *out;
+    int fd_disk;
+    uint8_t *disk;
+    struct stat statbuf;
+
     record file_record;
     range* data_ranges;
     int64_t mft_addr, file_record_id, file_record_addr, total_data_size;
     size_t data_range_size;
 
-    if (argc != 2){perror("argv"); exit(__LINE__);}
-    if ((disk = fopen(argv[1], "r+")) == NULL){perror("fopen disk"); exit(__LINE__);}
-    if (fread(&boot_sector, sizeof(bootsec), 1,disk) <= 0){perror("fread boot_sector"); exit(__LINE__);}
+    FILE* out;
 
+    if (argc != 2){perror("argv"); exit(__LINE__);}
+
+    if ((fd_disk = open(argv[1], O_RDWR)) < 0 ){perror("fopen disk"); exit(__LINE__);}
+
+    if (fstat(fd_disk, &statbuf) < 0 ){perror("fstat disk"); exit(__LINE__);}
+
+    printf("%lld\n", statbuf.st_size);
+
+    if ((disk = mmap(NULL, statbuf.st_size * sizeof(uint8_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd_disk, 0)) == MAP_FAILED )
+        {perror("mmap disk"); exit(__LINE__);}
+
+    printf("%hhx %hhx %hhx\n", disk[0], disk[1], disk[2]);
+
+    boot_sector = *(bootsec*)(disk);
     mft_addr = boot_sector.sector_size * boot_sector.cluster_size * boot_sector.MFT_addr;
+
+    printf("mft_addr %llu\n", mft_addr);
 
     file_record_id = find_file_by_name(disk, mft_addr, SEARCH_FILENAME);
     printf("find_file_by_name: %llu\n", file_record_id);
 
     file_record_addr = mft_addr + file_record_id * FILE_RECORD_SIZE;
-    fseek(disk, file_record_addr, SEEK_SET);
-    if (fread(&file_record, sizeof(record), 1,disk) <= 0){perror("fread record (main)"); exit(__LINE__);}
+
+    file_record = *(record*)(disk + file_record_addr);
 
     data_ranges = get_data_range_by_record(disk, file_record, file_record_addr, &data_range_size, &total_data_size);
     printf("data_attr_range[0].start: %llx, data_attr_range[0].end: %llx\n", data_ranges[0].start, data_ranges[0].end);
@@ -377,6 +376,6 @@ int main(int argc, char* argv[]){
     printf("total_readed: %llx\n", extract_file(disk, out, data_ranges, data_range_size, total_data_size));
 
     free(data_ranges);
-    fclose(disk);
+    close(fd_disk);
 }
 
